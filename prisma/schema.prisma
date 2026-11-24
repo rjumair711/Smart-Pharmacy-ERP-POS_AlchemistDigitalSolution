@@ -1,0 +1,368 @@
+// MediFlow AI — Smart Pharmacy ERP & POS
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  CASHIER
+}
+
+enum PoStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum PoItemStatus {
+  PENDING
+  PARTIAL
+  RECEIVED
+}
+
+enum StockSource {
+  MANUAL
+  AI_BILL
+  OPENING
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  WALLET
+}
+
+enum MovementType {
+  PURCHASE
+  SALE
+  CUSTOMER_RETURN
+  SUPPLIER_RETURN
+  ADJUSTMENT
+}
+
+enum SupplierReturnReason {
+  EXPIRED
+  NEAR_EXPIRY
+  DAMAGED
+  EXCESS
+  OTHER
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(CASHIER)
+  active       Boolean   @default(true)
+  lastActiveAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sales           Sale[]
+  purchaseOrders  PurchaseOrder[]
+  customerReturns CustomerReturn[]
+  supplierReturns SupplierReturn[]
+  supplierBills   SupplierBill[]
+  movements       StockMovement[]
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  description String?
+  color       String     @default("mint")
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  medicines   Medicine[]
+}
+
+model Supplier {
+  id            String    @id @default(cuid())
+  name          String    @unique
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  batches         MedicineBatch[]
+  purchaseOrders  PurchaseOrder[]
+  supplierReturns SupplierReturn[]
+  supplierBills   SupplierBill[]
+}
+
+model Medicine {
+  id                String   @id @default(cuid())
+  name              String   @unique
+  genericName       String?
+  manufacturer      String?
+  barcode           String?  @unique
+  unit              String   @default("units")
+  categoryId        String
+  /// Per-medicine override of Setting.lowStockThreshold (null = use global)
+  lowStockThreshold Int?
+  /// Per-medicine override of Setting.expiryLeadDays (null = use global)
+  expiryLeadDays    Int?
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  category      Category            @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  batches       MedicineBatch[]
+  poItems       PurchaseOrderItem[]
+  saleItems     SaleItem[]
+
+  @@index([categoryId])
+  @@index([genericName])
+}
+
+model MedicineBatch {
+  id              String      @id @default(cuid())
+  medicineId      String
+  supplierId      String?
+  batchNumber     String
+  expiryDate      DateTime    @db.Date
+  /// Current on-hand quantity
+  quantity        Int
+  /// Total quantity ever received into this batch
+  receivedQty     Int
+  purchasePrice   Decimal     @db.Decimal(12, 2)
+  mrp             Decimal     @db.Decimal(12, 2)
+  source          StockSource @default(MANUAL)
+  supplierBillId  String?
+  receivedAt      DateTime    @default(now())
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  medicine            Medicine             @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+  supplier            Supplier?            @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  supplierBill        SupplierBill?        @relation(fields: [supplierBillId], references: [id], onDelete: SetNull)
+  saleItems           SaleItem[]
+  supplierReturnItems SupplierReturnItem[]
+  poReceipts          PoReceipt[]
+  movements           StockMovement[]
+
+  @@unique([medicineId, batchNumber])
+  @@index([medicineId, expiryDate])
+  @@index([expiryDate])
+}
+
+model PurchaseOrder {
+  id           String    @id @default(cuid())
+  poNumber     String    @unique
+  supplierId   String
+  status       PoStatus  @default(ORDERED)
+  notes        String?
+  createdById  String
+  orderedAt    DateTime?
+  receivedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  supplier  Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  createdBy User                @relation(fields: [createdById], references: [id])
+  items     PurchaseOrderItem[]
+
+  @@index([status])
+  @@index([supplierId])
+}
+
+model PurchaseOrderItem {
+  id               String       @id @default(cuid())
+  purchaseOrderId  String
+  medicineId       String
+  quantityOrdered  Int
+  quantityReceived Int          @default(0)
+  unitCost         Decimal?     @db.Decimal(12, 2)
+  status           PoItemStatus @default(PENDING)
+  lastReceivedAt   DateTime?
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  medicine      Medicine      @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+  receipts      PoReceipt[]
+
+  @@index([medicineId, status])
+}
+
+/// Links a received batch quantity to the PO line it fulfilled (bill-to-stock reconciliation)
+model PoReceipt {
+  id              String   @id @default(cuid())
+  poItemId        String
+  batchId         String
+  quantity        Int
+  supplierBillId  String?
+  createdAt       DateTime @default(now())
+
+  poItem       PurchaseOrderItem @relation(fields: [poItemId], references: [id], onDelete: Cascade)
+  batch        MedicineBatch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  supplierBill SupplierBill?     @relation(fields: [supplierBillId], references: [id], onDelete: SetNull)
+}
+
+/// A supplier invoice processed through the AI scanner (or entered manually)
+model SupplierBill {
+  id            String    @id @default(cuid())
+  billNumber    String?
+  supplierId    String?
+  billDate      DateTime? @db.Date
+  totalAmount   Decimal   @default(0) @db.Decimal(12, 2)
+  fileName      String?
+  aiModel       String?
+  rawExtraction Json?
+  createdById   String
+  createdAt     DateTime  @default(now())
+
+  supplier   Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  createdBy  User            @relation(fields: [createdById], references: [id])
+  batches    MedicineBatch[]
+  poReceipts PoReceipt[]
+}
+
+model Sale {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique
+  cashierId     String
+  customerName  String?
+  customerPhone String?
+  paymentMethod PaymentMethod @default(CASH)
+  subtotal      Decimal       @db.Decimal(12, 2)
+  discount      Decimal       @default(0) @db.Decimal(12, 2)
+  tax           Decimal       @default(0) @db.Decimal(12, 2)
+  total         Decimal       @db.Decimal(12, 2)
+  /// Purchase cost of all sold units (for profit)
+  costTotal     Decimal       @db.Decimal(12, 2)
+  createdAt     DateTime      @default(now())
+
+  cashier User             @relation(fields: [cashierId], references: [id])
+  items   SaleItem[]
+  returns CustomerReturn[]
+
+  @@index([createdAt])
+}
+
+model SaleItem {
+  id               String  @id @default(cuid())
+  saleId           String
+  medicineId       String
+  batchId          String
+  quantity         Int
+  returnedQuantity Int     @default(0)
+  unitPrice        Decimal @db.Decimal(12, 2)
+  unitCost         Decimal @db.Decimal(12, 2)
+  lineTotal        Decimal @db.Decimal(12, 2)
+
+  sale        Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  medicine    Medicine             @relation(fields: [medicineId], references: [id])
+  batch       MedicineBatch        @relation(fields: [batchId], references: [id])
+  returnItems CustomerReturnItem[]
+}
+
+model CustomerReturn {
+  id            String   @id @default(cuid())
+  returnNumber  String   @unique
+  saleId        String
+  processedById String
+  reason        String?
+  refundAmount  Decimal  @db.Decimal(12, 2)
+  /// Purchase cost of the restocked units (reverses COGS)
+  restockedCost Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt     DateTime @default(now())
+
+  sale        Sale                 @relation(fields: [saleId], references: [id])
+  processedBy User                 @relation(fields: [processedById], references: [id])
+  items       CustomerReturnItem[]
+
+  @@index([createdAt])
+}
+
+model CustomerReturnItem {
+  id           String  @id @default(cuid())
+  returnId     String
+  saleItemId   String
+  quantity     Int
+  refundAmount Decimal @db.Decimal(12, 2)
+  restocked    Boolean @default(true)
+
+  customerReturn CustomerReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleItem       SaleItem       @relation(fields: [saleItemId], references: [id])
+}
+
+model SupplierReturn {
+  id              String               @id @default(cuid())
+  debitNoteNumber String               @unique
+  supplierId      String
+  processedById   String
+  reason          SupplierReturnReason
+  notes           String?
+  totalAmount     Decimal              @db.Decimal(12, 2)
+  createdAt       DateTime             @default(now())
+
+  supplier    Supplier             @relation(fields: [supplierId], references: [id])
+  processedBy User                 @relation(fields: [processedById], references: [id])
+  items       SupplierReturnItem[]
+
+  @@index([createdAt])
+}
+
+model SupplierReturnItem {
+  id        String  @id @default(cuid())
+  returnId  String
+  batchId   String
+  quantity  Int
+  unitCost  Decimal @db.Decimal(12, 2)
+  lineTotal Decimal @db.Decimal(12, 2)
+
+  supplierReturn SupplierReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  batch          MedicineBatch  @relation(fields: [batchId], references: [id])
+}
+
+/// Audit trail of every stock change (signed quantity)
+model StockMovement {
+  id        String       @id @default(cuid())
+  batchId   String
+  type      MovementType
+  quantity  Int
+  reference String?
+  userId    String?
+  createdAt DateTime     @default(now())
+
+  batch MedicineBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  user  User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([batchId, createdAt])
+}
+
+/// Single-row pharmacy configuration (id = 1)
+model Setting {
+  id                    Int     @id @default(1)
+  pharmacyName          String  @default("Noor Care Pharmacy")
+  phone                 String? @default("+92 51 234 5678")
+  email                 String? @default("hello@noorcare.pk")
+  address               String? @default("F-7 Markaz, Islamabad, Pakistan")
+  currency              String  @default("PKR")
+  taxRate               Decimal @default(0) @db.Decimal(5, 2)
+  invoicePrefix         String  @default("INV-")
+  receiptFormat         String  @default("thermal")
+  receiptFooter         String? @default("Thank you for choosing Noor Care. Get well soon!")
+  expiryAlertsEnabled   Boolean @default(true)
+  expiryLeadDays        Int     @default(30)
+  lowStockAlertsEnabled Boolean @default(true)
+  lowStockThreshold     Int     @default(20)
+}
+
+/// Atomic document number sequences (INV, PO, CR, DN)
+model Counter {
+  key   String @id
+  value Int    @default(0)
+}
