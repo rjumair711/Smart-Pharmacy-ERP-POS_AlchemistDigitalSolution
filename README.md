@@ -6,6 +6,107 @@ alerts and financial reports.
 
 **Stack:** Next.js 16 (App Router, route handlers) · PostgreSQL (Neon) · Prisma 6 · JWT session cookies (jose) + bcrypt · Zod · Google Gemini vision.
 
+**Live demo:** https://smartpharmacyalchemistdigitalsoluti.vercel.app — test credentials are under [Demo accounts](#demo-accounts).
+
+## System architecture
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    UI["Next.js pages<br/>Dashboard · POS · Inventory · POs<br/>AI Bill Scanner · Returns · Reports"]
+  end
+  subgraph Server["Next.js server (Vercel)"]
+    PX["proxy.ts<br/>session check + role redirect"]
+    API["/api/* route handlers<br/>route([roles], handler) · Zod validation"]
+    LIB["lib/server<br/>stock.ts (receive + PO reconcile, FEFO)<br/>po.ts · alerts.ts · metrics.ts · inventory.ts"]
+    GEM["gemini.ts<br/>vision extraction + model fallback"]
+  end
+  DB[("PostgreSQL (Neon)<br/>via Prisma")]
+  AI["Google Gemini API"]
+
+  UI -->|JWT cookie| PX --> API --> LIB --> DB
+  API -->|bill image/PDF| GEM --> AI
+```
+
+Request flow: the browser calls JSON route handlers under `app/api`. Each handler re-verifies the
+JWT session and role, validates the input with Zod, and runs its business logic in `lib/server` inside
+Prisma transactions, using row locks for stock and PO updates. Only the bill-extraction endpoint talks
+to Gemini.
+
+## Database schema
+
+```mermaid
+erDiagram
+  User ||--o{ Sale : "cashier"
+  User ||--o{ PurchaseOrder : "creates"
+  User ||--o{ SupplierBill : "uploads"
+  User ||--o{ CustomerReturn : "processes"
+  User ||--o{ SupplierReturn : "processes"
+  User ||--o{ StockMovement : "performs"
+  Category ||--o{ Medicine : "groups"
+  Medicine ||--o{ MedicineBatch : "stocked as"
+  Supplier ||--o{ MedicineBatch : "supplies"
+  Supplier ||--o{ PurchaseOrder : "receives"
+  Supplier ||--o{ SupplierBill : "issues"
+  Supplier ||--o{ SupplierReturn : "gets"
+  PurchaseOrder ||--|{ PurchaseOrderItem : "lines"
+  Medicine ||--o{ PurchaseOrderItem : "ordered"
+  PurchaseOrderItem ||--o{ PoReceipt : "fulfilled by"
+  MedicineBatch ||--o{ PoReceipt : "received into"
+  SupplierBill ||--o{ PoReceipt : "evidences"
+  SupplierBill ||--o{ MedicineBatch : "creates"
+  Sale ||--|{ SaleItem : "lines"
+  MedicineBatch ||--o{ SaleItem : "sold from"
+  Sale ||--o{ CustomerReturn : "returned"
+  CustomerReturn ||--|{ CustomerReturnItem : "lines"
+  SaleItem ||--o{ CustomerReturnItem : "returned"
+  SupplierReturn ||--|{ SupplierReturnItem : "lines"
+  MedicineBatch ||--o{ SupplierReturnItem : "returned"
+  MedicineBatch ||--o{ StockMovement : "audit log"
+
+  Medicine {
+    string name UK
+    string barcode UK
+    int lowStockThreshold
+    int expiryLeadDays
+  }
+  MedicineBatch {
+    string batchNumber
+    date expiryDate
+    int quantity
+    decimal purchasePrice
+    decimal mrp
+    enum source
+  }
+  PurchaseOrder {
+    string poNumber UK
+    enum status
+  }
+  PurchaseOrderItem {
+    int quantityOrdered
+    int quantityReceived
+    enum status
+  }
+  SupplierBill {
+    string billNumber
+    decimal totalAmount
+    json rawExtraction
+  }
+  Sale {
+    string invoiceNumber UK
+    decimal total
+    decimal costTotal
+    enum paymentMethod
+  }
+  User {
+    string email UK
+    enum role
+  }
+```
+
+Standalone tables: `Setting` (single row: pharmacy profile, tax, alert defaults) and `Counter` (atomic
+document numbers). Full definitions are in `prisma/schema.prisma`.
+
 ## Setup
 
 ```bash
@@ -31,7 +132,7 @@ Production: `pnpm build && pnpm start`. Deploy the app in the **same region as t
 ### Demo accounts
 | Role | Email | Password |
 |---|---|---|
-| Admin / Pharmacist | `admin@noorcare.pk` | `Admin@123` |
+| Admin | Pharmacist | `admin@noorcare.pk` | `Admin@123` |
 | Cashier | `cashier@noorcare.pk` | `Cashier@123` |
 
 Change these (Users & Roles) before real use. A sample supplier invoice lives at `public/demo-supplier-bill.png`
